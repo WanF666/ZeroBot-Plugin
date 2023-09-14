@@ -2,96 +2,117 @@
 package ahsai
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"math/rand"
-	"os"
-	"sort"
-	"strconv"
-	"time"
-
-	"github.com/FloatTech/floatbox/file"
-	ctrl "github.com/FloatTech/zbpctrl"
-	"github.com/FloatTech/zbputils/control"
-	ahsaitts "github.com/fumiama/ahsai"
-	zero "github.com/wdvxdr1123/ZeroBot"
-	"github.com/wdvxdr1123/ZeroBot/message"
+	"io/ioutil"
+	"net/http"
+	"strings"
 )
 
-var (
-	namelist = [...]string{"伊織弓鶴", "紲星あかり", "結月ゆかり", "京町セイカ", "東北きりたん", "東北イタコ", "ついなちゃん標準語", "ついなちゃん関西弁", "音街ウナ", "琴葉茜", "吉田くん", "民安ともえ", "桜乃そら", "月読アイ", "琴葉葵", "東北ずん子", "月読ショウタ", "水奈瀬コウ"}
-	namesort = func() []string {
-		nl := namelist[:]
-		sort.Strings(nl)
-		return nl
-	}()
-)
-
-func init() {
-	engine := control.AutoRegister(&ctrl.Options[*zero.Ctx]{
-		DisableOnDefault:  false,
-		Brief:             "フリーテキスト音声合成",
-		Help:              "- 使[伊織弓鶴|紲星あかり|結月ゆかり|京町セイカ|東北きりたん|東北イタコ|ついなちゃん標準語|ついなちゃん関西弁|音街ウナ|琴葉茜|吉田くん|民安ともえ|桜乃そら|月読アイ|琴葉葵|東北ずん子|月読ショウタ|水奈瀬コウ]说(日语)",
-		PrivateDataFolder: "ahsai",
-	})
-	cachePath := engine.DataFolder() + "cache/"
-	_ = os.RemoveAll(cachePath)
-	_ = os.MkdirAll(cachePath, 0755)
-	engine.OnRegex("^使(.{0,10})说([A-Za-z\\s\\d\u3005\u3040-\u30ff\u4e00-\u9fff\uff11-\uff19\uff21-\uff3a\uff41-\uff5a\uff66-\uff9d\\pP]+)$", selectName).SetBlock(true).Handle(func(ctx *zero.Ctx) {
-		ctx.SendChain(message.Text("少女祈祷中..."))
-		uid := ctx.Event.UserID
-		today := time.Now().Format("20060102150405")
-		ahsaiFile := cachePath + strconv.FormatInt(uid, 10) + today + "ahsai.wav"
-		s := ahsaitts.NewSpeaker()
-		err := s.SetName(ctx.State["ahsainame"].(string))
-		if err != nil {
-			ctx.SendChain(message.Text("ERROR: ", err))
-			return
-		}
-		u, err := s.Speak(ctx.State["ahsaitext"].(string))
-		if err != nil {
-			ctx.SendChain(message.Text("ERROR: ", err))
-			return
-		}
-		err = ahsaitts.SaveOggToFile(u, ahsaiFile)
-		if err != nil {
-			ctx.SendChain(message.Text("ERROR: ", err))
-			return
-		}
-		ctx.SendChain(message.Record("file:///" + file.BOTPATH + "/" + ahsaiFile))
-	})
+func main() {
+	http.HandleFunc("/storeHWID", storeHWIDHandler)
+	http.ListenAndServe(":8080", nil)
 }
 
-func selectName(ctx *zero.Ctx) bool {
-	regexMatched := ctx.State["regex_matched"].([]string)
-	ctx.State["ahsaitext"] = regexMatched[2]
-	name := regexMatched[1]
-	index := sort.SearchStrings(namesort, name)
-	if index < len(namelist) && namesort[index] == name {
-		ctx.State["ahsainame"] = name
-		return true
-	}
-	speaktext := ""
-	for i, v := range namelist {
-		speaktext += fmt.Sprintf("%d. %s\n", i, v)
-	}
-	ctx.SendChain(message.Text("输入的音源为空, 请输入音源序号\n", speaktext))
-	next, cancel := zero.NewFutureEvent("message", 999, false, ctx.CheckSession(), zero.RegexRule(`\d{0,2}`)).Repeat()
-	defer cancel()
-	for {
-		select {
-		case <-time.After(time.Second * 10):
-			ctx.State["ahsainame"] = namelist[rand.Intn(len(namelist))]
-			ctx.SendChain(message.Text("时间太久啦！", zero.BotConfig.NickName[0], "帮你选择", ctx.State["ahsainame"]))
-			return true
-		case c := <-next:
-			msg := c.Event.Message.ExtractPlainText()
-			num, _ := strconv.Atoi(msg)
-			if num < 0 || num >= len(namelist) {
-				ctx.SendChain(message.Text("序号非法!"))
-				continue
-			}
-			ctx.State["ahsainame"] = namelist[num]
-			return true
+func storeHWIDHandler(w http.ResponseWriter, r *http.Request) {
+	// 解析请求参数
+	content := r.URL.Query().Get("content")
+
+	// 检查是否收到特定命令消息
+	if strings.HasPrefix(content, "#验证") {
+		// 获取发送者的HWID
+		hwid := strings.TrimSpace(strings.TrimPrefix(content, "#验证"))
+
+		// 存储HWID到Gitee库的HWID.txt文件中
+		err := storeHWID(hwid)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "#验证失败")
+			return
 		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "#验证成功")
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, "Invalid request.")
 	}
+}
+
+func storeHWID(hwid string) error {
+	// Gitee库的API URL
+	apiURL := "https://gitee.com/api/v5/repos/wanf_1_0/breeze/contents/HWID.txt"
+
+	// Gitee库的信息
+	owner := "wanf_1_0"  // 替换为你的Gitee用户名
+	repo := "breeze"      // 替换为你的Gitee仓库名
+	path := "HWID.txt"
+
+	// 构建请求URL
+	url := strings.ReplaceAll(apiURL, "{owner}", owner)
+	url = strings.ReplaceAll(url, "{repo}", repo)
+	url = strings.ReplaceAll(url, "{path}", path)
+
+	// 读取现有的HWID.txt文件内容
+	existingContent, err := getExistingContent(url)
+	if err != nil {
+		return err
+	}
+
+	// 将新的HWID添加到现有内容中，每行一个HWID
+	newContent := existingContent + hwid + "\n"
+
+	// 构建请求体
+	body := fmt.Sprintf(`{
+		"message": "Update HWID",
+		"content": "%s"
+	}`, base64.StdEncoding.EncodeToString([]byte(newContent)))
+
+	// 发送请求
+	resp, err := http.Put(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 检查响应状态码
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("Failed to store HWID: %s", respBody)
+	}
+
+	return nil
+}
+
+func getExistingContent(url string) (string, error) {
+	// 发送请求获取现有的HWID.txt文件内容
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	// 读取响应体
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// 解析响应JSON
+	var content struct {
+		Content string `json:"content"`
+	}
+	err = json.Unmarshal(respBody, &content)
+	if err != nil {
+		return "", err
+	}
+
+	// 解码Base64内容
+	decodedContent, err := base64.StdEncoding.DecodeString(content.Content)
+	if err != nil {
+		return "", err
+	}
+
+	return string(decodedContent), nil
 }
